@@ -1,291 +1,325 @@
 # src/payment_processor.py
-from web3 import Web3
-from eth_typing import ChecksumAddress
-from typing import Optional, Dict, List
-import json
-from dataclasses import dataclass
+import asyncio
 from enum import Enum
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Callable
+import aiohttp
+from web3 import Web3, AsyncWeb3
+from web3.eth import AsyncEth
+from bitcoinlib.wallets import Wallet
+from solana.rpc.async_api import AsyncClient
+from datetime import datetime
+import hmac
+import hashlib
 import time
 
-# Standard ERC20 ABI for token interactions
-ERC20_ABI = json.loads('''[
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "name",
-        "outputs": [{"name": "", "type": "string"}],
-        "payable": false,
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "symbol",
-        "outputs": [{"name": "", "type": "string"}],
-        "payable": false,
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
-        "payable": false,
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "constant": true,
-        "inputs": [{"name": "_owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
-        "payable": false,
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "constant": false,
-        "inputs": [
-            {"name": "_to", "type": "address"},
-            {"name": "_value", "type": "uint256"}
-        ],
-        "name": "transfer",
-        "outputs": [{"name": "", "type": "bool"}],
-        "payable": false,
-        "stateMutability": "nonpayable",
-        "type": "function"
-    }
-]''')
+
+class Chain(Enum):
+    ETH = "ethereum"
+    BTC = "bitcoin"
+    SOL = "solana"
 
 
 class PaymentStatus(Enum):
     PENDING = "pending"
+    CONFIRMING = "confirming"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
-class PaymentError(Exception):
-    """Base class for payment-related errors"""
-    pass
-
-
-class InvalidAddressError(PaymentError):
-    """Raised when an Ethereum address is invalid"""
-    pass
-
-
-class InsufficientFundsError(PaymentError):
-    """Raised when wallet has insufficient token balance"""
-    pass
-
-
-class TransactionFailedError(PaymentError):
-    """Raised when a transaction fails"""
-    pass
-
-
 @dataclass
-class TokenInfo:
-    address: ChecksumAddress
-    name: str
-    symbol: str
-    decimals: int
-
-    def __str__(self):
-        return f"{self.name} ({self.symbol})"
+class BlockchainConfig:
+    chain: Chain
+    node_url: str
+    required_confirmations: int
+    webhook_url: Optional[str] = None
 
 
 @dataclass
 class Transaction:
-    tx_hash: str
-    from_address: ChecksumAddress
-    to_address: ChecksumAddress
+    tx_id: str
+    chain: Chain
+    from_address: str
+    to_address: str
     amount: float
-    token: TokenInfo
+    currency: str
     status: PaymentStatus
-    timestamp: float
+    confirmations: int = 0
+    timestamp: float = time.time()
     error_message: Optional[str] = None
 
-    def to_dict(self) -> Dict:
-        return {
-            "tx_hash": self.tx_hash,
-            "from_address": self.from_address,
-            "to_address": self.to_address,
-            "amount": self.amount,
-            "token_symbol": self.token.symbol,
-            "token_address": self.token.address,
-            "status": self.status.value,
-            "timestamp": self.timestamp,
-            "error_message": self.error_message
-        }
 
-
-class ERC20PaymentProcessor:
-    def __init__(self, provider_url: str):
-        """
-        Initialize payment processor with Ethereum provider URL
-        e.g., 'https://mainnet.infura.io/v3/YOUR-PROJECT-ID'
-        """
-        self.w3 = Web3(Web3.HTTPProvider(provider_url))
-        self.tokens: Dict[str, TokenInfo] = {}
+class MultiChainPaymentProcessor:
+    def __init__(self, configs: Dict[Chain, BlockchainConfig]):
+        self.configs = configs
         self.transactions: Dict[str, Transaction] = {}
 
-    def add_token(self, token_address: str) -> TokenInfo:
-        """Add and return info for an ERC20 token"""
-        if not self.w3.is_address(token_address):
-            raise InvalidAddressError(f"Invalid token address: {token_address}")
-
-        checksum_address = self.w3.to_checksum_address(token_address)
-        if checksum_address in self.tokens:
-            return self.tokens[checksum_address]
-
-        token_contract = self.w3.eth.contract(
-            address=checksum_address,
-            abi=ERC20_ABI
+        # Initialize blockchain clients
+        self.eth_client = AsyncWeb3(
+            Web3.AsyncHTTPProvider(configs[Chain.ETH].node_url)
         )
-
-        try:
-            token_info = TokenInfo(
-                address=checksum_address,
-                name=token_contract.functions.name().call(),
-                symbol=token_contract.functions.symbol().call(),
-                decimals=token_contract.functions.decimals().call()
-            )
-            self.tokens[checksum_address] = token_info
-            return token_info
-        except Exception as e:
-            raise PaymentError(f"Failed to load token info: {str(e)}")
-
-    def validate_address(self, address: str) -> ChecksumAddress:
-        """Validate and return checksum address"""
-        if not self.w3.is_address(address):
-            raise InvalidAddressError(f"Invalid Ethereum address: {address}")
-        return self.w3.to_checksum_address(address)
-
-    def get_token_balance(self, token_address: str, wallet_address: str) -> float:
-        """Get token balance for address in human-readable form"""
-        token = self.add_token(token_address)
-        checksum_wallet = self.validate_address(wallet_address)
-
-        token_contract = self.w3.eth.contract(
-            address=token.address,
-            abi=ERC20_ABI
+        self.btc_client = Wallet.create(
+            "btc_wallet", network='bitcoin',
+            service='bitcoind', db_uri=configs[Chain.BTC].node_url
         )
+        self.sol_client = AsyncClient(configs[Chain.SOL].node_url)
 
+        # Start transaction monitor
+        self.monitor = TransactionMonitor(self)
+        asyncio.create_task(self.monitor.start())
+
+    async def validate_eth_address(self, address: str) -> bool:
+        return self.eth_client.is_address(address)
+
+    async def validate_btc_address(self, address: str) -> bool:
         try:
-            balance_wei = token_contract.functions.balanceOf(checksum_wallet).call()
-            return balance_wei / (10 ** token.decimals)
-        except Exception as e:
-            raise PaymentError(f"Failed to get balance: {str(e)}")
+            # Validate Bitcoin address format and checksum
+            return bool(self.btc_client.addresslist.add(address))
+        except:
+            return False
 
-    def process_payment(
-            self,
-            private_key: str,
-            to_address: str,
-            amount: float,
-            token_address: str
-    ) -> Transaction:
-        """
-        Process an ERC20 token payment
+    async def validate_sol_address(self, address: str) -> bool:
+        # Basic Solana address validation
+        return len(address) == 44 and address.isalnum()
 
-        Parameters:
-        private_key: Sender's private key
-        to_address: Recipient's address
-        amount: Human-readable token amount
-        token_address: Token contract address
-        """
+    async def validate_address(self, address: str, chain: Chain) -> bool:
+        validators = {
+            Chain.ETH: self.validate_eth_address,
+            Chain.BTC: self.validate_btc_address,
+            Chain.SOL: self.validate_sol_address
+        }
+        return await validators[chain](address)
+
+    async def check_eth_balance(self, address: str) -> float:
+        balance_wei = await self.eth_client.eth.get_balance(address)
+        return Web3.from_wei(balance_wei, 'ether')
+
+    async def check_btc_balance(self, address: str) -> float:
+        wallet = self.btc_client.wallet(address)
+        return float(wallet.balance())
+
+    async def check_sol_balance(self, address: str) -> float:
+        balance = await self.sol_client.get_balance(address)
+        return balance.value / 10 ** 9  # Convert lamports to SOL
+
+    async def check_balance(self, address: str, chain: Chain) -> float:
+        balance_checkers = {
+            Chain.ETH: self.check_eth_balance,
+            Chain.BTC: self.check_btc_balance,
+            Chain.SOL: self.check_sol_balance
+        }
+        return await balance_checkers[chain](address)
+
+    async def send_eth_transaction(self, from_key: str, to_address: str,
+                                   amount: float) -> str:
+        account = self.eth_client.eth.account.from_key(from_key)
+        transaction = {
+            'nonce': await self.eth_client.eth.get_transaction_count(account.address),
+            'gasPrice': await self.eth_client.eth.gas_price,
+            'gas': 21000,
+            'to': to_address,
+            'value': Web3.to_wei(amount, 'ether'),
+            'data': b'',
+        }
+        signed = self.eth_client.eth.account.sign_transaction(transaction, from_key)
+        tx_hash = await self.eth_client.eth.send_raw_transaction(signed.rawTransaction)
+        return tx_hash.hex()
+
+    async def send_btc_transaction(self, from_key: str, to_address: str,
+                                   amount: float) -> str:
+        wallet = self.btc_client.wallet(privkey=from_key)
+        tx = wallet.send_to(to_address, amount)
+        return tx.hash
+
+    async def send_sol_transaction(self, from_key: str, to_address: str,
+                                   amount: float) -> str:
+        # Implement Solana transaction
+        # This is a placeholder - actual implementation would use solana-py
+        pass
+
+    async def process_payment(self, chain: Chain, from_key: str,
+                              to_address: str, amount: float) -> Transaction:
+        """Process payment on specified blockchain"""
+
+        # Validate address
+        if not await self.validate_address(to_address, chain):
+            raise ValueError(f"Invalid {chain.value} address: {to_address}")
+
+        # Check balance
+        from_address = self.get_address_from_key(from_key, chain)
+        balance = await self.check_balance(from_address, chain)
+        if balance < amount:
+            raise ValueError(f"Insufficient balance: {balance}")
+
+        # Send transaction
         try:
-            # Validate token and addresses
-            token = self.add_token(token_address)
-            from_address = self.w3.eth.account.from_key(private_key).address
-            to_checksum = self.validate_address(to_address)
-
-            # Convert amount to token units
-            token_amount = int(amount * (10 ** token.decimals))
-
-            # Check balance
-            balance = self.get_token_balance(token_address, from_address)
-            if balance < amount:
-                raise InsufficientFundsError(
-                    f"Insufficient {token.symbol} balance: {balance}"
-                )
-
-            # Prepare token transfer
-            token_contract = self.w3.eth.contract(
-                address=token.address,
-                abi=ERC20_ABI
-            )
-
-            # Prepare transaction
-            nonce = self.w3.eth.get_transaction_count(from_address)
-            gas_price = self.w3.eth.gas_price
-
-            transaction = token_contract.functions.transfer(
-                to_checksum,
-                token_amount
-            ).build_transaction({
-                'chainId': self.w3.eth.chain_id,
-                'gas': 100000,  # Estimate this in production
-                'gasPrice': gas_price,
-                'nonce': nonce,
-            })
-
-            # Sign and send transaction
-            signed_txn = self.w3.eth.account.sign_transaction(
-                transaction,
-                private_key
-            )
-            tx_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
-
-            # Wait for transaction receipt
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            senders = {
+                Chain.ETH: self.send_eth_transaction,
+                Chain.BTC: self.send_btc_transaction,
+                Chain.SOL: self.send_sol_transaction
+            }
+            tx_id = await senders[chain](from_key, to_address, amount)
 
             # Create transaction record
-            tx = Transaction(
-                tx_hash=receipt['transactionHash'].hex(),
+            transaction = Transaction(
+                tx_id=tx_id,
+                chain=chain,
                 from_address=from_address,
-                to_address=to_checksum,
+                to_address=to_address,
                 amount=amount,
-                token=token,
-                status=PaymentStatus.COMPLETED if receipt['status'] == 1
-                else PaymentStatus.FAILED,
-                timestamp=time.time()
+                currency=chain.value,
+                status=PaymentStatus.PENDING
             )
+            self.transactions[tx_id] = transaction
 
-            self.transactions[tx.tx_hash] = tx
-
-            if receipt['status'] != 1:
-                tx.error_message = "Transaction reverted"
-                raise TransactionFailedError("Transaction reverted by network")
-
-            return tx
+            # Monitor will automatically track confirmations
+            return transaction
 
         except Exception as e:
-            error_msg = str(e)
-            tx = Transaction(
-                tx_hash=tx_hash.hex() if 'tx_hash' in locals() else "failed",
-                from_address=from_address if 'from_address' in locals() else "",
-                to_address=to_checksum if 'to_checksum' in locals() else "",
-                amount=amount,
-                token=token if 'token' in locals() else None,
-                status=PaymentStatus.FAILED,
-                timestamp=time.time(),
-                error_message=error_msg
-            )
-            self.transactions[tx.tx_hash] = tx
-            raise TransactionFailedError(error_msg)
+            raise ValueError(f"Transaction failed: {str(e)}")
 
-    def get_transaction(self, tx_hash: str) -> Optional[Transaction]:
-        """Get transaction details by hash"""
-        return self.transactions.get(tx_hash)
+    def get_address_from_key(self, private_key: str, chain: Chain) -> str:
+        """Get public address from private key for specified chain"""
+        if chain == Chain.ETH:
+            account = self.eth_client.eth.account.from_key(private_key)
+            return account.address
+        elif chain == Chain.BTC:
+            wallet = self.btc_client.wallet(privkey=private_key)
+            return wallet.get_key().address
+        elif chain == Chain.SOL:
+            # Implement Solana key derivation
+            pass
 
-    def get_address_transactions(self, address: str) -> List[Transaction]:
-        """Get all transactions involving an address"""
-        checksum_address = self.validate_address(address)
+    async def get_transaction_info(self, tx_id: str) -> Optional[Transaction]:
+        """Get transaction details and current status"""
+        return self.transactions.get(tx_id)
+
+    async def get_address_transactions(self, address: str,
+                                       chain: Chain) -> List[Transaction]:
+        """Get all transactions for an address on specified chain"""
         return [
             tx for tx in self.transactions.values()
-            if tx.from_address == checksum_address or
-               tx.to_address == checksum_address
+            if tx.chain == chain and (
+                    tx.from_address == address or tx.to_address == address
+            )
         ]
+
+
+class TransactionMonitor:
+    def __init__(self, processor: MultiChainPaymentProcessor):
+        self.processor = processor
+        self.callbacks: Dict[str, List[Callable]] = {}
+
+    async def start(self):
+        """Start monitoring transactions across all chains"""
+        while True:
+            await self.check_all_transactions()
+            await asyncio.sleep(10)  # Check every 10 seconds
+
+    async def check_all_transactions(self):
+        """Check confirmations for all pending transactions"""
+        tasks = []
+        for tx in self.processor.transactions.values():
+            if tx.status in [PaymentStatus.PENDING, PaymentStatus.CONFIRMING]:
+                tasks.append(self.check_transaction(tx))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def check_transaction(self, transaction: Transaction):
+        """Check confirmations for a single transaction"""
+        try:
+            if transaction.chain == Chain.ETH:
+                confirmations = await self.check_eth_confirmations(transaction.tx_id)
+            elif transaction.chain == Chain.BTC:
+                confirmations = await self.check_btc_confirmations(transaction.tx_id)
+            elif transaction.chain == Chain.SOL:
+                confirmations = await self.check_sol_confirmations(transaction.tx_id)
+
+            transaction.confirmations = confirmations
+            config = self.processor.configs[transaction.chain]
+
+            if confirmations >= config.required_confirmations:
+                transaction.status = PaymentStatus.COMPLETED
+                await self.notify_completion(transaction)
+            elif confirmations > 0:
+                transaction.status = PaymentStatus.CONFIRMING
+
+        except Exception as e:
+            transaction.status = PaymentStatus.FAILED
+            transaction.error_message = str(e)
+            await self.notify_error(transaction)
+
+    async def check_eth_confirmations(self, tx_hash: str) -> int:
+        """Check confirmations for Ethereum transaction"""
+        try:
+            tx = await self.processor.eth_client.eth.get_transaction(tx_hash)
+            if tx and tx['blockNumber']:
+                current_block = await self.processor.eth_client.eth.block_number
+                return current_block - tx['blockNumber'] + 1
+            return 0
+        except Exception:
+            return 0
+
+    async def check_btc_confirmations(self, tx_hash: str) -> int:
+        """Check confirmations for Bitcoin transaction"""
+        try:
+            tx = self.processor.btc_client.gettransaction(tx_hash)
+            return tx.get('confirmations', 0)
+        except Exception:
+            return 0
+
+    async def check_sol_confirmations(self, signature: str) -> int:
+        """Check confirmations for Solana transaction"""
+        try:
+            response = await self.processor.sol_client.get_signature_statuses([signature])
+            if response.value[0] and response.value[0].confirmations:
+                return response.value[0].confirmations
+            return 0
+        except Exception:
+            return 0
+
+    async def notify_completion(self, transaction: Transaction):
+        """Send webhook notification for completed transaction"""
+        config = self.processor.configs[transaction.chain]
+        if config.webhook_url:
+            await self.send_webhook(config.webhook_url, {
+                'event': 'transaction.completed',
+                'transaction': {
+                    'tx_id': transaction.tx_id,
+                    'chain': transaction.chain.value,
+                    'amount': transaction.amount,
+                    'currency': transaction.currency,
+                    'confirmations': transaction.confirmations,
+                    'timestamp': transaction.timestamp
+                }
+            })
+
+    async def notify_error(self, transaction: Transaction):
+        """Send webhook notification for failed transaction"""
+        config = self.processor.configs[transaction.chain]
+        if config.webhook_url:
+            await self.send_webhook(config.webhook_url, {
+                'event': 'transaction.failed',
+                'transaction': {
+                    'tx_id': transaction.tx_id,
+                    'chain': transaction.chain.value,
+                    'error': transaction.error_message,
+                    'timestamp': transaction.timestamp
+                }
+            })
+
+    async def send_webhook(self, url: str, data: dict):
+        """Send webhook notification"""
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=data) as response:
+                    return await response.json()
+            except Exception as e:
+                print(f"Webhook failed: {str(e)}")
+
+    def add_callback(self, tx_id: str, callback: Callable):
+        """Add callback for transaction updates"""
+        if tx_id not in self.callbacks:
+            self.callbacks[tx_id] = []
+        self.callbacks[tx_id].append(callback)
