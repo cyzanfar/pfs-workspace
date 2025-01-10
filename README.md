@@ -9,8 +9,8 @@ My primary objective is to achieve economic freedom through sustainable passive 
 ### Key Goals
 
 1. **Build a Steady Passive Income Stream**
-   - Target: 100 PFT monthly (3 months)
-   - Scale to: 300 PFT monthly (12 months)
+   - Target: 27,000 PFT monthly (3 months)
+   - Scale to: 40,500 PFT monthly (12 months)
    - Focus: Task participation and automation
 
 2. **Create System Value**
@@ -20,7 +20,7 @@ My primary objective is to achieve economic freedom through sustainable passive 
 
 3. **Establish Long-Term Wealth Growth**
    - Stake 50% of monthly PFT earnings
-   - Build 3,000 PFT reserves (18 months)
+   - Build 300,000 PFT reserves (18 months)
    - Transition to automated passive income
 
 ## Progress Tracking
