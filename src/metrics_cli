@@ -1,0 +1,227 @@
+import argparse
+import json
+from datetime import datetime, timedelta
+from metrics_collector import MetricsCollector, MetricDefinition
+
+class MetricsCLI:
+    """
+    Command-line interface for interacting with MetricsCollector.
+
+    Provides commands for registering metrics, collecting data,
+    querying historical data, and managing the metrics system.
+    """
+
+    def __init__(self):
+        """
+        Initialize the CLI with a MetricsCollector instance.
+        """
+        self.collector = MetricsCollector()
+
+    def register_metric(self, args):
+        """
+        Register a new metric definition via CLI.
+
+        Args:
+            args (Namespace): Parsed CLI arguments
+        """
+        try:
+            metric_def = MetricDefinition(
+                name=args.name,
+                description=args.description,
+                unit=args.unit,
+                warning_threshold=args.warning_threshold,
+                critical_threshold=args.critical_threshold
+            )
+            self.collector.register_metric(metric_def)
+            print(f"Metric {args.name} registered successfully.")
+        except Exception as e:
+            print(f"Error registering metric: {e}")
+
+    def collect_metric(self, args):
+        """
+        Collect a metric value via CLI.
+
+        Args:
+            args (Namespace): Parsed CLI arguments
+        """
+        try:
+            self.collector.collect_metric(args.name, args.value)
+            print(f"Metric {args.name} collected: {args.value}")
+        except Exception as e:
+            print(f"Error collecting metric: {e}")
+
+    def get_metric_history(self, args):
+        """
+        Retrieve and display metric history.
+
+        Args:
+            args (Namespace): Parsed CLI arguments
+        """
+        try:
+            # Parse optional start and end times
+            start_time = datetime.fromisoformat(args.start_time) if args.start_time else None
+            end_time = datetime.fromisoformat(args.end_time) if args.end_time else None
+
+            history = self.collector.get_metric_history(
+                args.name,
+                start_time,
+                end_time
+            )
+
+            # Pretty print the history
+            print(json.dumps(
+                [{
+                    'timestamp': entry['timestamp'].isoformat(),
+                    'value': entry['value']
+                } for entry in history],
+                indent=2
+            ))
+        except Exception as e:
+            print(f"Error retrieving metric history: {e}")
+
+    def get_metric_stats(self, args):
+        """
+        Calculate and display metric statistics.
+
+        Args:
+            args (Namespace): Parsed CLI arguments
+        """
+        try:
+            stats = self.collector.calculate_metric_stats(args.name)
+            print(json.dumps(stats, indent=2))
+        except Exception as e:
+            print(f"Error calculating metric stats: {e}")
+
+    def export_metrics(self, args):
+        """
+        Export all metrics to a JSON file.
+
+        Args:
+            args (Namespace): Parsed CLI arguments
+        """
+        try:
+            output_file = self.collector.export_metrics(args.output)
+            print(f"Metrics exported to: {output_file}")
+        except Exception as e:
+            print(f"Error exporting metrics: {e}")
+
+    def run(self):
+        """
+        Set up and run the CLI argument parser.
+        """
+        parser = argparse.ArgumentParser(
+            description="MetricsCollector CLI for system performance tracking"
+        )
+        subparsers = parser.add_subparsers(
+            dest='command',
+            help='Available commands'
+        )
+
+        # Register Metric Command
+        register_parser = subparsers.add_parser(
+            'register',
+            help='Register a new metric definition'
+        )
+        register_parser.add_argument(
+            'name',
+            help='Unique name of the metric'
+        )
+        register_parser.add_argument(
+            'description',
+            help='Description of the metric'
+        )
+        register_parser.add_argument(
+            'unit',
+            help='Unit of measurement'
+        )
+        register_parser.add_argument(
+            '--warning-threshold',
+            type=float,
+            help='Warning threshold value'
+        )
+        register_parser.add_argument(
+            '--critical-threshold',
+            type=float,
+            help='Critical threshold value'
+        )
+
+        # Collect Metric Command
+        collect_parser = subparsers.add_parser(
+            'collect',
+            help='Collect a metric value'
+        )
+        collect_parser.add_argument(
+            'name',
+            help='Name of the metric'
+        )
+        collect_parser.add_argument(
+            'value',
+            type=float,
+            help='Value of the metric'
+        )
+
+        # Get Metric History Command
+        history_parser = subparsers.add_parser(
+            'history',
+            help='Retrieve metric history'
+        )
+        history_parser.add_argument(
+            'name',
+            help='Name of the metric'
+        )
+        history_parser.add_argument(
+            '--start-time',
+            help='Start time (ISO format)'
+        )
+        history_parser.add_argument(
+            '--end-time',
+            help='End time (ISO format)'
+        )
+
+        # Get Metric Stats Command
+        stats_parser = subparsers.add_parser(
+            'stats',
+            help='Calculate metric statistics'
+        )
+        stats_parser.add_argument(
+            'name',
+            help='Name of the metric'
+        )
+
+        # Export Metrics Command
+        export_parser = subparsers.add_parser(
+            'export',
+            help='Export all metrics to a JSON file'
+        )
+        export_parser.add_argument(
+            '--output',
+            help='Optional output file path'
+        )
+
+        # Parse arguments and dispatch
+        args = parser.parse_args()
+
+        # Map commands to methods
+        command_map = {
+            'register': self.register_metric,
+            'collect': self.collect_metric,
+            'history': self.get_metric_history,
+            'stats': self.get_metric_stats,
+            'export': self.export_metrics
+        }
+
+        # Execute the appropriate command
+        if args.command:
+            command_map[args.command](args)
+        else:
+            parser.print_help()
+
+def main():
+    """
+    Entry point for the MetricsCLI.
+    """
+    cli = MetricsCLI()
+    cli.run()
+
+if __name__ == '__main__':
+    main()
