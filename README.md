@@ -29,7 +29,7 @@ My primary objective is to achieve economic freedom through sustainable passive 
 
 | Metric | Target | Current | Progress |
 |--------|---------|----------|-----------|
-| Monthly PFT Income | 100 | 0 | 0% |
+| Monthly PFT Income | 27,000 | 0 | 0% |
 | Staked PFT | 50% of earnings | 0 | 0% |
 | User Support Count | 5 | 0 | 0% |
 | Approved Proposals | 3 (in 6 months) | 0 | 0% |
