@@ -98,7 +98,7 @@ class TestMessageBroker(unittest.TestCase):
         message_id = self.broker.publish(
             self.test_topic,
             "test message",
-            delivery_guarantee=DeliveryGuarantee.EXACTLY_ONCE
+            delivery_guarantee=DeliveryGuarantee.EXACTLY_ONCEx
         )
 
         # Allow time for delivery
